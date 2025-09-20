@@ -39,6 +39,35 @@ app.use(
 app.use(cookieParser());
 app.use(express.json());
 
+// --- helpers: language / artist caps ---
+const isMostlyASCII = (s = "") => {
+  if (!s) return true;
+  const non = (s.match(/[^\x00-\x7F]/g) || []).length;
+  return non <= Math.ceil(s.length * 0.10); // allow up to ~10% non-ASCII
+};
+
+const isEnglishishTrack = (t) => {
+  if (!isMostlyASCII(t.name)) return false;
+  const artists = Array.isArray(t.artists) ? t.artists : [];
+  // pass if at least one artist name looks English-ish
+  return artists.some(a => isMostlyASCII(a?.name));
+};
+
+const capByArtist = (tracks, maxPerArtist = 2) => {
+  const seen = new Map();
+  const out = [];
+  for (const t of tracks) {
+    const key = t.artists?.[0]?.id || t.artists?.[0]?.name || "unknown";
+    const n = (seen.get(key) || 0) + 1;
+    if (n <= maxPerArtist) {
+      out.push(t);
+      seen.set(key, n);
+    }
+  }
+  return out;
+};
+
+
 // --- In-memory token store (simple) ---
 let accessTokens = {}; // { demo: { access_token, refresh_token, expires_in, expires_at, ... } }
 
@@ -216,7 +245,7 @@ app.get("/api/recommendations", async (req, res) => {
 
       const s = await axios.get("https://api.spotify.com/v1/search", {
         headers: baseHeaders, // no Accept needed
-        params: { q: `genre:"${genre}"`, type: "track", limit: params.limit },
+        params: { q: `genre:"${genre}"`, type: "track", limit: params.limit, market: "from_token"},
       });
       const tracks = s.data?.tracks?.items || [];
       if (!tracks.length) return res.json({ tracks: [] });
@@ -286,7 +315,7 @@ app.get("/api/recommendations_fallback", async (req, res) => {
 
     const search = await axios.get("https://api.spotify.com/v1/search", {
       headers,
-      params: { q: `genre:"${genre}"`, type: "track", limit: 30 },
+      params: { q: `genre:"${genre}"`, type: "track", limit: 30, market: "from_token"},
     });
     const tracks = search.data?.tracks?.items || [];
     if (!tracks.length) return res.json({ tracks: [] });
@@ -433,7 +462,7 @@ app.get("/debug/search-pop", async (_req, res) => {
     const headers = await getAuthHeaders();
     const r = await axios.get("https://api.spotify.com/v1/search", {
       headers,
-      params: { q: 'genre:"pop"', type: "track", limit: 1 }, // no market (works for you)
+      params: { q: 'genre:"pop"', type: "track", limit: 1, market: "from_token"}, // no market (works for you)
     });
     res.json({ ok: true, tracks: r.data.tracks?.items?.length || 0 });
   } catch (e) {
@@ -459,6 +488,22 @@ app.get("/api/mood-recs", async (req, res) => {
     const targetEnergy  = Number(req.query.target_energy  ?? 0.5);
     const targetDance   = Number(req.query.target_danceability ?? 0.5);
     const minTempo      = Number(req.query.min_tempo ?? 0);
+
+    // inside /api/mood-recs, after you compute:
+    // targetValence, targetEnergy, targetDance, minTempo
+    const valenceBand = 0.18;     // tighten/loosen as you like
+    const energyBand  = 0.20;
+    const danceBand   = 0.20;
+
+const withinMood = (f) => {
+  if (!f) return true; // if features missing, let scoring handle it
+  const vOK = Math.abs((f.valence ?? 0.5)      - targetValence)     <= valenceBand;
+  const eOK = Math.abs((f.energy ?? 0.5)       - targetEnergy)      <= energyBand;
+  const dOK = Math.abs((f.danceability ?? 0.5) - targetDance)       <= danceBand;
+  const tOK = minTempo ? (f.tempo ?? 0) >= minTempo - 5 : true;
+  return vOK && eOK && dOK && tOK;
+};
+
 
     const genres = seedGenres
       .map(g => g.toLowerCase().replace(/[^a-z0-9 -]/g, "").replace(/\s+/g, " ").trim())
@@ -527,7 +572,7 @@ const fetchFeaturesMap = async (tracks, headers) => {
       const q = genres.map(g => `genre:"${g}"`).join(" OR ");
       try {
         const s = await axios.get("https://api.spotify.com/v1/search", {
-          headers, params: { q, type: "track", limit }
+          headers, params: { q, type: "track", limit, market: "from_token"}
         });
         return s.data?.tracks?.items || [];
       } catch (e) {
@@ -541,7 +586,7 @@ const fetchFeaturesMap = async (tracks, headers) => {
       const g = genres[0];
       try {
         const a = await axios.get("https://api.spotify.com/v1/search", {
-          headers, params: { q: `genre:"${g}"`, type: "artist", limit: 5 }
+          headers, params: { q: `genre:"${g}"`, type: "artist", limit: 5, market: "from_token"}
         });
         const artists = a.data?.artists?.items || [];
         let pool = [];
@@ -565,34 +610,30 @@ const fetchFeaturesMap = async (tracks, headers) => {
       }
     };
 
-    // Build pool with fallbacks
-    let pool = [];
-    try { pool = await tryTrackSearch(); } catch (_) { /* fall through */ }
-    if (!pool.length) pool = await tryArtistTopTracks();
-    if (!pool.length) {
-      // Loose text fallback
-      const q = "chill calm mellow"; // neutral default
-      try {
-        const s = await axios.get("https://api.spotify.com/v1/search", {
-          headers, params: { q, type: "track", limit }
-        });
-        pool = s.data?.tracks?.items || [];
-      } catch (e) {
-        const status = e.response?.status; const msg = e.response?.data || e.message;
-        console.error("SEARCH(loose) 403?", status, msg);
-      }
-    }
-    if (!pool.length) return res.json({ tracks: [] });
+    // 1) English-ish filter first
+    pool = pool.filter(isEnglishishTrack);
 
+    // 2) Fetch features WITH headers (you already fixed this bug)
     const byId = await fetchFeaturesMap(pool, headers);
 
-    const ranked = pool
+    // 3) Gate by mood using features (drop obvious mismatches)
+    let gated = pool.filter(t => withinMood(byId[t.id]));
+
+    // If gating got too aggressive, fall back to original pool
+    if (gated.length < 10) gated = pool;
+
+    // 4) Score and sort
+    const ranked = gated
       .map(t => ({ t, s: scoreTrack(byId[t.id]) }))
       .sort((a,b) => b.s - a.s)
       .map(x => x.t);
 
-    res.json({ tracks: ranked.slice(0, 20) });
-  } catch (e) {
+    // 5) Cap artists to max 2 each, then slice
+    const finalList = capByArtist(ranked, 2).slice(0, 20);
+
+    res.json({ tracks: finalList });
+
+      } catch (e) {
     return res.status(e.status || e.response?.status || 500).json({
       error: "mood-recs failed",
       step: e.step || undefined,
