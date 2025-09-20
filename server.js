@@ -310,6 +310,38 @@ app.get("/debug/recs-artist", async (_req, res) => {
   }
 });
 
+// recommendations with explicit market=US and seed_genres=pop
+app.get("/debug/recs-us", async (_req, res) => {
+  try {
+    const r = await axios.get("https://api.spotify.com/v1/recommendations", {
+      headers: { Authorization: `Bearer ${accessTokens.demo?.access_token}` },
+      params: { seed_genres: "pop", limit: 1, market: "US" },
+    });
+    res.json({ ok: true, tracks: r.data.tracks?.length || 0 });
+  } catch (e) {
+    res.status(e.response?.status || 500).json({
+      status: e.response?.status, data: e.response?.data, url: e.config?.url,
+      params: e.config?.params, headers: e.response?.headers,
+    });
+  }
+});
+
+// recommendations seeded by a known track (bypasses genres)
+app.get("/debug/recs-track", async (_req, res) => {
+  try {
+    const r = await axios.get("https://api.spotify.com/v1/recommendations", {
+      headers: { Authorization: `Bearer ${accessTokens.demo?.access_token}` },
+      params: { seed_tracks: "3AJwUDP919kvQ9QcozQPxg", limit: 1, market: "US" },
+    });
+    res.json({ ok: true, tracks: r.data.tracks?.length || 0 });
+  } catch (e) {
+    res.status(e.response?.status || 500).json({
+      status: e.response?.status, data: e.response?.data, url: e.config?.url,
+      params: e.config?.params, headers: e.response?.headers,
+    });
+  }
+});
+
 app.get("/debug/recs-noagent", async (_req, res) => {
   try {
     const r = await axios.get("https://api.spotify.com/v1/recommendations", {
