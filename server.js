@@ -35,7 +35,7 @@ app.use(
     origin: (origin, cb) => (!origin || ALLOWED_ORIGINS.includes(origin) ? cb(null, true) : cb(null, false)),
     credentials: true,
   })
-);
+  );
 app.use(cookieParser());
 app.use(express.json());
 
@@ -261,15 +261,15 @@ app.get("/api/recommendations", async (req, res) => {
       const targE = Number(req.query.target_energy ?? 0.5);
 
       const scored = tracks
-        .map((t) => {
-          const f = byId[t.id] || {};
-          const v = f.valence ?? 0.5;
-          const en = f.energy ?? 0.5;
-          const score = -(Math.abs(v - targV) + Math.abs(en - targE));
-          return { track: t, score };
-        })
-        .sort((a, b) => b.score - a.score)
-        .map((x) => x.track);
+      .map((t) => {
+        const f = byId[t.id] || {};
+        const v = f.valence ?? 0.5;
+        const en = f.energy ?? 0.5;
+        const score = -(Math.abs(v - targV) + Math.abs(en - targE));
+        return { track: t, score };
+      })
+      .sort((a, b) => b.score - a.score)
+      .map((x) => x.track);
 
       return res.json({ tracks: scored.slice(0, 20) });
     } catch (e3) {
@@ -328,15 +328,15 @@ app.get("/api/recommendations_fallback", async (req, res) => {
     const byId = Object.fromEntries((feats.data.audio_features || []).map((f) => [f.id, f]));
 
     const scored = tracks
-      .map((t) => {
-        const f = byId[t.id] || {};
-        const v = f.valence ?? 0.5;
-        const en = f.energy ?? 0.5;
-        const score = -(Math.abs(v - targetValence) + Math.abs(en - targetEnergy));
-        return { track: t, score };
-      })
-      .sort((a, b) => b.score - a.score)
-      .map((x) => x.track);
+    .map((t) => {
+      const f = byId[t.id] || {};
+      const v = f.valence ?? 0.5;
+      const en = f.energy ?? 0.5;
+      const score = -(Math.abs(v - targetValence) + Math.abs(en - targetEnergy));
+      return { track: t, score };
+    })
+    .sort((a, b) => b.score - a.score)
+    .map((x) => x.track);
 
     res.json({ tracks: scored.slice(0, 20) });
   } catch (e) {
@@ -502,8 +502,8 @@ app.get("/api/mood-recs", async (req, res) => {
     };
 
     const genres = seedGenres
-      .map(g => g.toLowerCase().replace(/[^a-z0-9 -]/g, "").replace(/\s+/g, " ").trim())
-      .filter(Boolean);
+    .map(g => g.toLowerCase().replace(/[^a-z0-9 -]/g, "").replace(/\s+/g, " ").trim())
+    .filter(Boolean);
     if (!genres.length) genres.push("pop");
 
     const scoreTrack = (f) => {
@@ -512,16 +512,16 @@ app.get("/api/mood-recs", async (req, res) => {
       const da = f?.danceability ?? 0.5;
       const te = f?.tempo ?? 0;
       return -(Math.abs(v-targetValence)*0.40 +
-               Math.abs(en-targetEnergy)*0.40 +
-               Math.abs(da-targetDance)*0.15 +
-               (minTempo ? Math.max(0, minTempo - te)/200 : 0)*0.05);
+       Math.abs(en-targetEnergy)*0.40 +
+       Math.abs(da-targetDance)*0.15 +
+       (minTempo ? Math.max(0, minTempo - te)/200 : 0)*0.05);
     };
 
     // ---- helpers (route-local) ----
     const chunk = (arr, n) => {
       const out = [];
       for (let i = 0; i < arr.length; i += n) out.push(arr.slice(i, i + n));
-      return out;
+        return out;
     };
 
     const fetchFeaturesMap = async (tracks, headers) => {
@@ -549,52 +549,65 @@ app.get("/api/mood-recs", async (req, res) => {
           const r = await axios.get(`https://api.spotify.com/v1/audio-features/${id}`, { headers });
           if (r.data?.id) map[r.data.id] = r.data;
         } catch { /* ignore single failures */ }
-      }
-      return map;
-    };
+        }
+        return map;
+      };
 
-    const tryTrackSearch = async () => {
-      const q = genres.map(g => `genre:"${g}"`).join(" OR ");
-      const s = await axios.get("https://api.spotify.com/v1/search", {
-        headers, params: { q, type: "track", limit, market: "from_token" }
-      });
-      return s.data?.tracks?.items || [];
-    };
-
-    const tryArtistTopTracks = async () => {
-      const g = genres[0];
-      const a = await axios.get("https://api.spotify.com/v1/search", {
-        headers, params: { q: `genre:"${g}"`, type: "artist", limit: 5, market: "from_token" }
-      });
-      const artists = a.data?.artists?.items || [];
-      let pool = [];
-      for (const art of artists) {
+      const tryTrackSearch = async () => {
+        const q = genres.map(g => `genre:"${g}"`).join(" OR ");
         try {
-          const tt = await axios.get(`https://api.spotify.com/v1/artists/${art.id}/top-tracks`, {
-            headers, params: { market: "from_token" }
-          });
-          pool = pool.concat(tt.data?.tracks || []);
-        } catch { /* skip artist on error */ }
-        if (pool.length >= limit) break;
-      }
-      return pool.slice(0, limit);
-    };
+          const s = await axios.get("https://api.spotify.com/v1/search", {
+        headers, params: { q, type: "track", limit }   // ⟵ no market
+      });
+          return s.data?.tracks?.items || [];
+        } catch (e) {
+          throw { step: "search-tracks", error: e.response?.data || e.message, status: e.response?.status };
+        }
+      };
+
+      const tryArtistTopTracks = async () => {
+        const g = genres[0];
+        try {
+          const a = await axios.get("https://api.spotify.com/v1/search", {
+        headers, params: { q: `genre:"${g}"`, type: "artist", limit: 5 }  // ⟵ no market
+      });
+          const artists = a.data?.artists?.items || [];
+          let pool = [];
+          for (const art of artists) {
+            try {
+              const tt = await axios.get(`https://api.spotify.com/v1/artists/${art.id}/top-tracks`, {
+            headers, params: { /* market intentionally omitted */ }       // ⟵ no market
+              });
+              pool = pool.concat(tt.data?.tracks || []);
+            } catch (e1) {
+          // tag per-artist failure, skip and continue
+              console.warn("artist-top-tracks failed", art.id, e1.response?.status || e1.message);
+            }
+            if (pool.length >= limit) break;
+          }
+          return pool.slice(0, limit);
+        } catch (e) {
+          throw { step: "search-artists", error: e.response?.data || e.message, status: e.response?.status };
+        }
+      };
+
 
     // ---- BUILD POOL (this is where `pool` belongs) ----
-    let pool = [];
+      let pool = [];
     try { pool = await tryTrackSearch(); } catch { /* fall through */ }
-    if (!pool.length) pool = await tryArtistTopTracks();
-    if (!pool.length) {
-      // loose text fallback
-      const q = "chill calm mellow";
-      try {
-        const s = await axios.get("https://api.spotify.com/v1/search", {
-          headers, params: { q, type: "track", limit, market: "from_token" }
-        });
-        pool = s.data?.tracks?.items || [];
-      } catch { /* ignore */ }
-    }
-    if (!pool.length) return res.json({ tracks: [] });
+      if (!pool.length) pool = await tryArtistTopTracks();
+      if (!pool.length) {
+        const q = "chill calm mellow";
+        try {
+          const s = await axios.get("https://api.spotify.com/v1/search", {
+        headers, params: { q, type: "track", limit }   // ⟵ no market
+      });
+          pool = s.data?.tracks?.items || [];
+        } catch (e) {
+          throw { step: "search-loose", error: e.response?.data || e.message, status: e.response?.status };
+        }
+      }
+      if (!pool.length) return res.json({ tracks: [] });
 
     // ---- FILTER → FEATURES → GATE → SCORE → DEDUPE ----
     pool = pool.filter(isEnglishishTrack);                         // English-ish only
@@ -602,9 +615,9 @@ app.get("/api/mood-recs", async (req, res) => {
     let gated = pool.filter(t => withinMood(byId[t.id]));          // mood gate
     if (gated.length < 10) gated = pool;                           // relax if too few
     const ranked = gated
-      .map(t => ({ t, s: scoreTrack(byId[t.id]) }))
-      .sort((a, b) => b.s - a.s)
-      .map(x => x.t);
+    .map(t => ({ t, s: scoreTrack(byId[t.id]) }))
+    .sort((a, b) => b.s - a.s)
+    .map(x => x.t);
     const finalList = capByArtist(ranked, 2).slice(0, 20);         // max 2/artist
 
     res.setHeader("X-Mood-Strategy", "pool/search+features");
@@ -614,7 +627,7 @@ app.get("/api/mood-recs", async (req, res) => {
     return res.status(e.status || e.response?.status || 500).json({
       error: "mood-recs failed",
       step: e.step || undefined,
-      detail: e.msg || e.response?.data || e.message || String(e)
+      detail: e.error || e.response?.data || e.message || String(e),
     });
   }
 });
