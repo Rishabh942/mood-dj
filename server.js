@@ -474,18 +474,54 @@ app.get("/api/mood-recs", async (req, res) => {
                + (minTempo ? Math.max(0, minTempo - te)/200 : 0)*0.05);
     };
 
-    const fetchFeaturesMap = async (tracks) => {
-      if (!tracks.length) return {};
+    // --- helpers inside /api/mood-recs ---
+
+// Chunk an array
+const chunk = (arr, n) => {
+  const out = [];
+  for (let i = 0; i < arr.length; i += n) out.push(arr.slice(i, i + n));
+  return out;
+};
+
+// Fetch /v1/audio-features with fallbacks:
+// 1) batched (<=100) -> if 403, try per-id -> if still 403, return {}
+const fetchFeaturesMap = async (tracks, headers) => {
+  if (!tracks.length) return {};
+  const ids = tracks.map(t => t.id);
+  const batches = chunk(ids, 100);
+  const map = {};
+
+  // try batched
+  try {
+    for (const b of batches) {
+      const r = await axios.get("https://api.spotify.com/v1/audio-features", {
+        headers, params: { ids: b.join(",") }
+      });
+      (r.data.audio_features || []).forEach(f => { if (f?.id) map[f.id] = f; });
+    }
+    return map;
+  } catch (e) {
+    console.error("AF batch failed:", e.response?.status, e.response?.data || e.message);
+  }
+
+  // fallback: try one-by-one (best-effort)
+  try {
+    for (const id of ids) {
       try {
-        const ids = tracks.map(t => t.id).join(",");
-        const feats = await axios.get("https://api.spotify.com/v1/audio-features", { headers, params: { ids } });
-        return Object.fromEntries((feats.data.audio_features || []).map(f => [f.id, f]));
-      } catch (e) {
-        const status = e.response?.status; const msg = e.response?.data || e.message;
-        console.error("AUDIO-FEATURES 403?", status, msg);
-        throw { step: "audio-features", status, msg };
+        const r = await axios.get(`https://api.spotify.com/v1/audio-features/${id}`, { headers });
+        if (r.data?.id) map[r.data.id] = r.data;
+      } catch (e1) {
+        // swallow individual failures
       }
-    };
+    }
+    return map;
+  } catch (e) {
+    console.error("AF per-id failed:", e.response?.status, e.response?.data || e.message);
+    // final fallback: no features
+    return {};
+  }
+};
+
 
     const tryTrackSearch = async () => {
       const q = genres.map(g => `genre:"${g}"`).join(" OR ");
@@ -548,7 +584,8 @@ app.get("/api/mood-recs", async (req, res) => {
     }
     if (!pool.length) return res.json({ tracks: [] });
 
-    const byId = await fetchFeaturesMap(pool);
+    const byId = await fetchFeaturesMap(pool, headers);
+
     const ranked = pool
       .map(t => ({ t, s: scoreTrack(byId[t.id]) }))
       .sort((a,b) => b.s - a.s)
