@@ -4,6 +4,7 @@ import dns from "dns";
 import https from "https";
 dns.setDefaultResultOrder("ipv4first");                 // prefer IPv4
 const ipv4Agent = new https.Agent({ family: 4 });       // reuse one IPv4 agent
+const useIPv4Agent = !process.env.RENDER; // true locally, false on Render
 
 // --- Standard imports ---
 import express from "express";
@@ -99,7 +100,7 @@ app.get("/api/available-genres", async (_req, res) => {
   try {
     const r = await axios.get(
       "https://api.spotify.com/v1/recommendations/available-genre-seeds",
-      { headers: authHeader(), httpsAgent: ipv4Agent } // <-- force IPv4 here
+      { headers: authHeader(), httpsAgent: useIPv4Agent ? ipv4Agent : undefined } // <-- force IPv4 here
     );
     res.json(r.data);
   } catch (e) {
@@ -144,7 +145,7 @@ app.get("/api/recommendations", async (req, res) => {
     const r1 = await axios.get("https://api.spotify.com/v1/recommendations", {
       headers,
       params,
-      httpsAgent: ipv4Agent,
+      httpsAgent: useIPv4Agent ? ipv4Agent : undefined
     });
     return res.json(r1.data);
   } catch (e1) {
@@ -158,7 +159,7 @@ app.get("/api/recommendations", async (req, res) => {
     const r2 = await axios.get("https://api.spotify.com/v1/recommendations", {
       headers,
       params: p2,
-      httpsAgent: ipv4Agent,
+      httpsAgent: useIPv4Agent ? ipv4Agent : undefined
     });
     return res.json(r2.data);
   } catch (e2) {
@@ -276,7 +277,7 @@ app.get("/debug/recs-min", async (_req, res) => {
     const r = await axios.get("https://api.spotify.com/v1/recommendations", {
       headers: authHeader(),
       params: { seed_genres: "pop", limit: 1 },
-      httpsAgent: ipv4Agent, // <— crucial
+      httpsAgent: useIPv4Agent ? ipv4Agent : undefined, // <— crucial
     });
     res.json({ ok: true, tracks: r.data.tracks?.length || 0 });
   } catch (e) {
@@ -295,7 +296,26 @@ app.get("/debug/recs-artist", async (_req, res) => {
     const r = await axios.get("https://api.spotify.com/v1/recommendations", {
       headers: authHeader(),
       params: { seed_artists: "4NHQUGzhtTLFvgF5SZesLK", limit: 1 },
-      httpsAgent: ipv4Agent, // <— crucial
+      httpsAgent: useIPv4Agent ? ipv4Agent : undefined, // <— crucial
+    });
+    res.json({ ok: true, tracks: r.data.tracks?.length || 0 });
+  } catch (e) {
+    res.status(e.response?.status || 500).json({
+      status: e.response?.status,
+      data: e.response?.data,
+      url: e.config?.url,
+      params: e.config?.params,
+      headers: e.response?.headers,
+    });
+  }
+});
+
+app.get("/debug/recs-noagent", async (_req, res) => {
+  try {
+    const r = await axios.get("https://api.spotify.com/v1/recommendations", {
+      headers: { Authorization: `Bearer ${accessTokens.demo?.access_token}` },
+      params: { seed_genres: "pop", limit: 1 },
+      // NO httpsAgent here
     });
     res.json({ ok: true, tracks: r.data.tracks?.length || 0 });
   } catch (e) {
@@ -313,7 +333,7 @@ app.get("/debug/seeds", async (_req, res) => {
   try {
     const r = await axios.get("https://api.spotify.com/v1/recommendations/available-genre-seeds", {
       headers: authHeader(),
-      httpsAgent: ipv4Agent, // <— crucial
+      httpsAgent: useIPv4Agent ? ipv4Agent : undefined, // <— crucial
     });
     res.json(r.data);
   } catch (e) {
