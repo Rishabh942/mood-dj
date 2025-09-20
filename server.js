@@ -447,64 +447,133 @@ app.get("/debug/search-pop", async (_req, res) => {
   }
 });
 
-// Mood-based recommendations that avoid /v1/recommendations entirely
 app.get("/api/mood-recs", async (req, res) => {
   try {
     const headers = await getAuthHeaders();
 
-    // inputs from client
-    const seedGenres = String(req.query.seed_genres || "pop")
-      .split(",").map(s => s.trim()).filter(Boolean);
-    const limit            = Number(req.query.limit || 40);
-    const targetValence    = Number(req.query.target_valence ?? 0.5);
-    const targetEnergy     = Number(req.query.target_energy  ?? 0.5);
-    const targetDance      = Number(req.query.target_danceability ?? 0.5);
-    const minTempo         = Number(req.query.min_tempo ?? 0);
+    // ---- Inputs
+    const raw = String(req.query.seed_genres || "pop");
+    const seedGenres = raw.split(",").map(s => s.trim()).filter(Boolean);
 
-    // Build a search query like: genre:"lo-fi" OR genre:"chill"
-    const q = seedGenres.length
-      ? seedGenres.map(g => `genre:"${g}"`).join(" OR ")
-      : 'genre:"pop"';
+    const limit         = Math.min(Math.max(Number(req.query.limit || 40), 20), 50); // 20–50 pool
+    const targetValence = Number(req.query.target_valence ?? 0.5);
+    const targetEnergy  = Number(req.query.target_energy  ?? 0.5);
+    const targetDance   = Number(req.query.target_danceability ?? 0.5);
+    const minTempo      = Number(req.query.min_tempo ?? 0);
 
-    // 1) Search a pool of tracks
-    const s = await axios.get("https://api.spotify.com/v1/search", {
-      headers,
-      params: { q, type: "track", limit: Math.min(Math.max(limit, 20), 50) }, // 20–50
-    });
-    const tracks = s.data?.tracks?.items || [];
-    if (!tracks.length) return res.json({ tracks: [] });
+    // ---- Sanitize genres (fix things like "acoustic Cambient")
+    const genres = seedGenres
+      .map(g =>
+        g
+          .toLowerCase()
+          .replace(/[^a-z0-9 -]/g, "")   // keep letters, numbers, space, dash
+          .replace(/\s+/g, " ")
+          .trim()
+      )
+      .filter(Boolean);
 
-    // 2) Fetch audio features
-    const ids = tracks.map(t => t.id).join(",");
-    const feats = await axios.get("https://api.spotify.com/v1/audio-features", {
-      headers, params: { ids },
-    });
-    const byId = Object.fromEntries((feats.data.audio_features || []).map(f => [f.id, f]));
+    // Helper: score by mood closeness
+    const scoreTrack = (t, f) => {
+      const v  = f?.valence       ?? 0.5;
+      const en = f?.energy        ?? 0.5;
+      const da = f?.danceability  ?? 0.5;
+      const te = f?.tempo         ?? 0;
 
-    // 3) Score by mood closeness
-    const scored = tracks.map(t => {
-      const f  = byId[t.id] || {};
-      const v  = f.valence ?? 0.5;
-      const en = f.energy  ?? 0.5;
-      const da = f.danceability ?? 0.5;
-      const te = f.tempo ?? 0;
-
+      // weights tuned to feel nice
       const score =
-        - (Math.abs(v  - targetValence) * 0.40
-        +  Math.abs(en - targetEnergy)  * 0.40
-        +  Math.abs(da - targetDance)   * 0.15
-        +  (minTempo ? Math.max(0, minTempo - te) / 200 : 0) * 0.05);
+        -(Math.abs(v  - targetValence) * 0.40 +
+          Math.abs(en - targetEnergy)  * 0.40 +
+          Math.abs(da - targetDance)   * 0.15 +
+          (minTempo ? Math.max(0, minTempo - te) / 200 : 0) * 0.05);
+      return score;
+    };
 
-      return { track: t, score };
-    })
-    .sort((a,b) => b.score - a.score)
-    .map(x => x.track);
+    // Helper: fetch audio features for a list of tracks
+    const fetchFeaturesMap = async (tracks) => {
+      if (!tracks.length) return {};
+      const ids = tracks.map(t => t.id).join(",");
+      const feats = await axios.get("https://api.spotify.com/v1/audio-features", {
+        headers, params: { ids }
+      });
+      return Object.fromEntries((feats.data.audio_features || []).map(f => [f.id, f]));
+    };
+
+    // ---- Strategy A: Track search using genre tokens (OR’d)
+    const tryTrackSearch = async () => {
+      if (!genres.length) genres.push("pop");
+      const q = genres.map(g => `genre:"${g}"`).join(" OR ");
+      const s = await axios.get("https://api.spotify.com/v1/search", {
+        headers,
+        params: { q, type: "track", limit }
+      });
+      return s.data?.tracks?.items || [];
+    };
+
+    // ---- Strategy B: Artist search → top tracks
+    const tryArtistTopTracks = async () => {
+      const g = genres[0] || "pop";
+      const a = await axios.get("https://api.spotify.com/v1/search", {
+        headers,
+        params: { q: `genre:"${g}"`, type: "artist", limit: 5 }
+      });
+      const artists = a.data?.artists?.items || [];
+      let pool = [];
+      for (const art of artists) {
+        const tt = await axios.get(`https://api.spotify.com/v1/artists/${art.id}/top-tracks`, {
+          headers, params: { market: "from_token" }
+        });
+        pool = pool.concat(tt.data?.tracks || []);
+        if (pool.length >= limit) break;
+      }
+      return pool.slice(0, limit);
+    };
+
+    // ---- Strategy C: Loose text search (adjectives) as last resort
+    const tryLooseText = async () => {
+      const words = {
+        chill: "chill calm",
+        sad: "sad melancholy",
+        happy: "happy upbeat",
+        energetic: "energetic hype",
+        angry: "angry heavy",
+        neutral: "mellow easy",
+      };
+      const moodWord = Object.keys(words).find(k => genres.includes(k)) || "chill";
+      const q = words[moodWord] || "chill calm";
+      const s = await axios.get("https://api.spotify.com/v1/search", {
+        headers,
+        params: { q, type: "track", limit }
+      });
+      return s.data?.tracks?.items || [];
+    };
+
+    // ---- Build pool
+    let pool = await tryTrackSearch();
+
+    if (!pool.length) {
+      pool = await tryArtistTopTracks();
+    }
+    if (!pool.length) {
+      pool = await tryLooseText();
+    }
+    if (!pool.length) return res.json({ tracks: [] });
+
+    // ---- Score with audio features
+    const byId = await fetchFeaturesMap(pool);
+    const scored = pool
+      .map(t => ({ track: t, score: scoreTrack(t, byId[t.id]) }))
+      .sort((a, b) => b.score - a.score)
+      .map(x => x.track);
 
     res.json({ tracks: scored.slice(0, 20) });
   } catch (e) {
-    res.status(e.response?.status || 500).json({ error: "mood-recs failed", detail: e.response?.data || e.message });
+    res.status(e.response?.status || 500).json({
+      error: "mood-recs failed",
+      detail: e.response?.data || e.message
+    });
   }
 });
+
 
 
 // ---------------- Health ----------------
