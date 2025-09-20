@@ -451,128 +451,119 @@ app.get("/api/mood-recs", async (req, res) => {
   try {
     const headers = await getAuthHeaders();
 
-    // ---- Inputs
     const raw = String(req.query.seed_genres || "pop");
     const seedGenres = raw.split(",").map(s => s.trim()).filter(Boolean);
 
-    const limit         = Math.min(Math.max(Number(req.query.limit || 40), 20), 50); // 20–50 pool
+    const limit         = Math.min(Math.max(Number(req.query.limit || 40), 20), 50);
     const targetValence = Number(req.query.target_valence ?? 0.5);
     const targetEnergy  = Number(req.query.target_energy  ?? 0.5);
     const targetDance   = Number(req.query.target_danceability ?? 0.5);
     const minTempo      = Number(req.query.min_tempo ?? 0);
 
-    // ---- Sanitize genres (fix things like "acoustic Cambient")
     const genres = seedGenres
-      .map(g =>
-        g
-          .toLowerCase()
-          .replace(/[^a-z0-9 -]/g, "")   // keep letters, numbers, space, dash
-          .replace(/\s+/g, " ")
-          .trim()
-      )
+      .map(g => g.toLowerCase().replace(/[^a-z0-9 -]/g, "").replace(/\s+/g, " ").trim())
       .filter(Boolean);
+    if (!genres.length) genres.push("pop");
 
-    // Helper: score by mood closeness
-    const scoreTrack = (t, f) => {
-      const v  = f?.valence       ?? 0.5;
-      const en = f?.energy        ?? 0.5;
-      const da = f?.danceability  ?? 0.5;
-      const te = f?.tempo         ?? 0;
-
-      // weights tuned to feel nice
-      const score =
-        -(Math.abs(v  - targetValence) * 0.40 +
-          Math.abs(en - targetEnergy)  * 0.40 +
-          Math.abs(da - targetDance)   * 0.15 +
-          (minTempo ? Math.max(0, minTempo - te) / 200 : 0) * 0.05);
-      return score;
+    const scoreTrack = (f) => {
+      const v  = f?.valence ?? 0.5;
+      const en = f?.energy  ?? 0.5;
+      const da = f?.danceability ?? 0.5;
+      const te = f?.tempo ?? 0;
+      return -(Math.abs(v-targetValence)*0.40 + Math.abs(en-targetEnergy)*0.40 + Math.abs(da-targetDance)*0.15
+               + (minTempo ? Math.max(0, minTempo - te)/200 : 0)*0.05);
     };
 
-    // Helper: fetch audio features for a list of tracks
     const fetchFeaturesMap = async (tracks) => {
       if (!tracks.length) return {};
-      const ids = tracks.map(t => t.id).join(",");
-      const feats = await axios.get("https://api.spotify.com/v1/audio-features", {
-        headers, params: { ids }
-      });
-      return Object.fromEntries((feats.data.audio_features || []).map(f => [f.id, f]));
-    };
-
-    // ---- Strategy A: Track search using genre tokens (OR’d)
-    const tryTrackSearch = async () => {
-      if (!genres.length) genres.push("pop");
-      const q = genres.map(g => `genre:"${g}"`).join(" OR ");
-      const s = await axios.get("https://api.spotify.com/v1/search", {
-        headers,
-        params: { q, type: "track", limit }
-      });
-      return s.data?.tracks?.items || [];
-    };
-
-    // ---- Strategy B: Artist search → top tracks
-    const tryArtistTopTracks = async () => {
-      const g = genres[0] || "pop";
-      const a = await axios.get("https://api.spotify.com/v1/search", {
-        headers,
-        params: { q: `genre:"${g}"`, type: "artist", limit: 5 }
-      });
-      const artists = a.data?.artists?.items || [];
-      let pool = [];
-      for (const art of artists) {
-        const tt = await axios.get(`https://api.spotify.com/v1/artists/${art.id}/top-tracks`, {
-          headers, params: { market: "from_token" }
-        });
-        pool = pool.concat(tt.data?.tracks || []);
-        if (pool.length >= limit) break;
+      try {
+        const ids = tracks.map(t => t.id).join(",");
+        const feats = await axios.get("https://api.spotify.com/v1/audio-features", { headers, params: { ids } });
+        return Object.fromEntries((feats.data.audio_features || []).map(f => [f.id, f]));
+      } catch (e) {
+        const status = e.response?.status; const msg = e.response?.data || e.message;
+        console.error("AUDIO-FEATURES 403?", status, msg);
+        throw { step: "audio-features", status, msg };
       }
-      return pool.slice(0, limit);
     };
 
-    // ---- Strategy C: Loose text search (adjectives) as last resort
-    const tryLooseText = async () => {
-      const words = {
-        chill: "chill calm",
-        sad: "sad melancholy",
-        happy: "happy upbeat",
-        energetic: "energetic hype",
-        angry: "angry heavy",
-        neutral: "mellow easy",
-      };
-      const moodWord = Object.keys(words).find(k => genres.includes(k)) || "chill";
-      const q = words[moodWord] || "chill calm";
-      const s = await axios.get("https://api.spotify.com/v1/search", {
-        headers,
-        params: { q, type: "track", limit }
-      });
-      return s.data?.tracks?.items || [];
+    const tryTrackSearch = async () => {
+      const q = genres.map(g => `genre:"${g}"`).join(" OR ");
+      try {
+        const s = await axios.get("https://api.spotify.com/v1/search", {
+          headers, params: { q, type: "track", limit }
+        });
+        return s.data?.tracks?.items || [];
+      } catch (e) {
+        const status = e.response?.status; const msg = e.response?.data || e.message;
+        console.error("SEARCH(track) 403?", status, msg, { q });
+        throw { step: "search-track", status, msg, q };
+      }
     };
 
-    // ---- Build pool
-    let pool = await tryTrackSearch();
+    const tryArtistTopTracks = async () => {
+      const g = genres[0];
+      try {
+        const a = await axios.get("https://api.spotify.com/v1/search", {
+          headers, params: { q: `genre:"${g}"`, type: "artist", limit: 5 }
+        });
+        const artists = a.data?.artists?.items || [];
+        let pool = [];
+        for (const art of artists) {
+          try {
+            const tt = await axios.get(`https://api.spotify.com/v1/artists/${art.id}/top-tracks`, {
+              headers, params: { market: "from_token" }
+            });
+            pool = pool.concat(tt.data?.tracks || []);
+          } catch (e) {
+            const status = e.response?.status; const msg = e.response?.data || e.message;
+            console.error("ARTIST TOP-TRACKS 403?", status, msg, { artist: art.id });
+          }
+          if (pool.length >= limit) break;
+        }
+        return pool.slice(0, limit);
+      } catch (e) {
+        const status = e.response?.status; const msg = e.response?.data || e.message;
+        console.error("SEARCH(artist) 403?", status, msg, { g });
+        return [];
+      }
+    };
 
+    // Build pool with fallbacks
+    let pool = [];
+    try { pool = await tryTrackSearch(); } catch (_) { /* fall through */ }
+    if (!pool.length) pool = await tryArtistTopTracks();
     if (!pool.length) {
-      pool = await tryArtistTopTracks();
-    }
-    if (!pool.length) {
-      pool = await tryLooseText();
+      // Loose text fallback
+      const q = "chill calm mellow"; // neutral default
+      try {
+        const s = await axios.get("https://api.spotify.com/v1/search", {
+          headers, params: { q, type: "track", limit }
+        });
+        pool = s.data?.tracks?.items || [];
+      } catch (e) {
+        const status = e.response?.status; const msg = e.response?.data || e.message;
+        console.error("SEARCH(loose) 403?", status, msg);
+      }
     }
     if (!pool.length) return res.json({ tracks: [] });
 
-    // ---- Score with audio features
     const byId = await fetchFeaturesMap(pool);
-    const scored = pool
-      .map(t => ({ track: t, score: scoreTrack(t, byId[t.id]) }))
-      .sort((a, b) => b.score - a.score)
-      .map(x => x.track);
+    const ranked = pool
+      .map(t => ({ t, s: scoreTrack(byId[t.id]) }))
+      .sort((a,b) => b.s - a.s)
+      .map(x => x.t);
 
-    res.json({ tracks: scored.slice(0, 20) });
+    res.json({ tracks: ranked.slice(0, 20) });
   } catch (e) {
-    res.status(e.response?.status || 500).json({
+    return res.status(e.status || e.response?.status || 500).json({
       error: "mood-recs failed",
-      detail: e.response?.data || e.message
+      step: e.step || undefined,
+      detail: e.msg || e.response?.data || e.message || e
     });
   }
 });
+
 
 
 
