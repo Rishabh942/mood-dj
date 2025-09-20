@@ -43,14 +43,14 @@ app.use(express.json());
 const isMostlyASCII = (s = "") => {
   if (!s) return true;
   const non = (s.match(/[^\x00-\x7F]/g) || []).length;
-  return non <= Math.ceil(s.length * 0.10); // allow up to ~10% non-ASCII
+  return non <= Math.ceil(0); // all must be ASCII
 };
 
 const isEnglishishTrack = (t) => {
   if (!isMostlyASCII(t.name)) return false;
   const artists = Array.isArray(t.artists) ? t.artists : [];
   // pass if at least one artist name looks English-ish
-  return artists.some(a => isMostlyASCII(a?.name));
+  return artists.every(a => isMostlyASCII(a?.name));
 };
 
 const capByArtist = (tracks, maxPerArtist = 2) => {
@@ -490,7 +490,7 @@ app.get("/api/mood-recs", async (req, res) => {
     const minTempo      = Number(req.query.min_tempo ?? 0);
 
     // mood gating bands
-    const valenceBand = 0.18, energyBand = 0.20, danceBand = 0.20;
+    const valenceBand = 0.10, energyBand = 0.15, danceBand = 0.30;
 
     const withinMood = (f) => {
       if (!f) return true; // if missing features, let scoring handle it
