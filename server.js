@@ -480,30 +480,26 @@ app.get("/api/mood-recs", async (req, res) => {
   try {
     const headers = await getAuthHeaders();
 
+    // ---- inputs / targets ----
     const raw = String(req.query.seed_genres || "pop");
     const seedGenres = raw.split(",").map(s => s.trim()).filter(Boolean);
-
     const limit         = Math.min(Math.max(Number(req.query.limit || 40), 20), 50);
     const targetValence = Number(req.query.target_valence ?? 0.5);
     const targetEnergy  = Number(req.query.target_energy  ?? 0.5);
     const targetDance   = Number(req.query.target_danceability ?? 0.5);
     const minTempo      = Number(req.query.min_tempo ?? 0);
 
-    // inside /api/mood-recs, after you compute:
-    // targetValence, targetEnergy, targetDance, minTempo
-    const valenceBand = 0.18;     // tighten/loosen as you like
-    const energyBand  = 0.20;
-    const danceBand   = 0.20;
+    // mood gating bands
+    const valenceBand = 0.18, energyBand = 0.20, danceBand = 0.20;
 
-const withinMood = (f) => {
-  if (!f) return true; // if features missing, let scoring handle it
-  const vOK = Math.abs((f.valence ?? 0.5)      - targetValence)     <= valenceBand;
-  const eOK = Math.abs((f.energy ?? 0.5)       - targetEnergy)      <= energyBand;
-  const dOK = Math.abs((f.danceability ?? 0.5) - targetDance)       <= danceBand;
-  const tOK = minTempo ? (f.tempo ?? 0) >= minTempo - 5 : true;
-  return vOK && eOK && dOK && tOK;
-};
-
+    const withinMood = (f) => {
+      if (!f) return true; // if missing features, let scoring handle it
+      const vOK = Math.abs((f.valence ?? 0.5)      - targetValence)    <= valenceBand;
+      const eOK = Math.abs((f.energy  ?? 0.5)      - targetEnergy)     <= energyBand;
+      const dOK = Math.abs((f.danceability ?? 0.5) - targetDance)      <= danceBand;
+      const tOK = minTempo ? (f.tempo ?? 0) >= (minTempo - 5) : true;
+      return vOK && eOK && dOK && tOK;
+    };
 
     const genres = seedGenres
       .map(g => g.toLowerCase().replace(/[^a-z0-9 -]/g, "").replace(/\s+/g, " ").trim())
@@ -515,132 +511,114 @@ const withinMood = (f) => {
       const en = f?.energy  ?? 0.5;
       const da = f?.danceability ?? 0.5;
       const te = f?.tempo ?? 0;
-      return -(Math.abs(v-targetValence)*0.40 + Math.abs(en-targetEnergy)*0.40 + Math.abs(da-targetDance)*0.15
-               + (minTempo ? Math.max(0, minTempo - te)/200 : 0)*0.05);
+      return -(Math.abs(v-targetValence)*0.40 +
+               Math.abs(en-targetEnergy)*0.40 +
+               Math.abs(da-targetDance)*0.15 +
+               (minTempo ? Math.max(0, minTempo - te)/200 : 0)*0.05);
     };
 
-    // --- helpers inside /api/mood-recs ---
+    // ---- helpers (route-local) ----
+    const chunk = (arr, n) => {
+      const out = [];
+      for (let i = 0; i < arr.length; i += n) out.push(arr.slice(i, i + n));
+      return out;
+    };
 
-// Chunk an array
-const chunk = (arr, n) => {
-  const out = [];
-  for (let i = 0; i < arr.length; i += n) out.push(arr.slice(i, i + n));
-  return out;
-};
+    const fetchFeaturesMap = async (tracks, headers) => {
+      if (!tracks.length) return {};
+      const ids = tracks.map(t => t.id);
+      const batches = chunk(ids, 100);
+      const map = {};
 
-// Fetch /v1/audio-features with fallbacks:
-// 1) batched (<=100) -> if 403, try per-id -> if still 403, return {}
-const fetchFeaturesMap = async (tracks, headers) => {
-  if (!tracks.length) return {};
-  const ids = tracks.map(t => t.id);
-  const batches = chunk(ids, 100);
-  const map = {};
-
-  // try batched
-  try {
-    for (const b of batches) {
-      const r = await axios.get("https://api.spotify.com/v1/audio-features", {
-        headers, params: { ids: b.join(",") }
-      });
-      (r.data.audio_features || []).forEach(f => { if (f?.id) map[f.id] = f; });
-    }
-    return map;
-  } catch (e) {
-    console.error("AF batch failed:", e.response?.status, e.response?.data || e.message);
-  }
-
-  // fallback: try one-by-one (best-effort)
-  try {
-    for (const id of ids) {
+      // batched attempt
       try {
-        const r = await axios.get(`https://api.spotify.com/v1/audio-features/${id}`, { headers });
-        if (r.data?.id) map[r.data.id] = r.data;
-      } catch (e1) {
-        // swallow individual failures
+        for (const b of batches) {
+          const r = await axios.get("https://api.spotify.com/v1/audio-features", {
+            headers, params: { ids: b.join(",") }
+          });
+          (r.data.audio_features || []).forEach(f => { if (f?.id) map[f.id] = f; });
+        }
+        return map;
+      } catch (e) {
+        console.error("AF batch failed:", e.response?.status, e.response?.data || e.message);
       }
-    }
-    return map;
-  } catch (e) {
-    console.error("AF per-id failed:", e.response?.status, e.response?.data || e.message);
-    // final fallback: no features
-    return {};
-  }
-};
 
+      // per-id fallback
+      for (const id of ids) {
+        try {
+          const r = await axios.get(`https://api.spotify.com/v1/audio-features/${id}`, { headers });
+          if (r.data?.id) map[r.data.id] = r.data;
+        } catch { /* ignore single failures */ }
+      }
+      return map;
+    };
 
     const tryTrackSearch = async () => {
       const q = genres.map(g => `genre:"${g}"`).join(" OR ");
-      try {
-        const s = await axios.get("https://api.spotify.com/v1/search", {
-          headers, params: { q, type: "track", limit, market: "from_token"}
-        });
-        return s.data?.tracks?.items || [];
-      } catch (e) {
-        const status = e.response?.status; const msg = e.response?.data || e.message;
-        console.error("SEARCH(track) 403?", status, msg, { q });
-        throw { step: "search-track", status, msg, q };
-      }
+      const s = await axios.get("https://api.spotify.com/v1/search", {
+        headers, params: { q, type: "track", limit, market: "from_token" }
+      });
+      return s.data?.tracks?.items || [];
     };
 
     const tryArtistTopTracks = async () => {
       const g = genres[0];
-      try {
-        const a = await axios.get("https://api.spotify.com/v1/search", {
-          headers, params: { q: `genre:"${g}"`, type: "artist", limit: 5, market: "from_token"}
-        });
-        const artists = a.data?.artists?.items || [];
-        let pool = [];
-        for (const art of artists) {
-          try {
-            const tt = await axios.get(`https://api.spotify.com/v1/artists/${art.id}/top-tracks`, {
-              headers, params: { market: "from_token" }
-            });
-            pool = pool.concat(tt.data?.tracks || []);
-          } catch (e) {
-            const status = e.response?.status; const msg = e.response?.data || e.message;
-            console.error("ARTIST TOP-TRACKS 403?", status, msg, { artist: art.id });
-          }
-          if (pool.length >= limit) break;
-        }
-        return pool.slice(0, limit);
-      } catch (e) {
-        const status = e.response?.status; const msg = e.response?.data || e.message;
-        console.error("SEARCH(artist) 403?", status, msg, { g });
-        return [];
+      const a = await axios.get("https://api.spotify.com/v1/search", {
+        headers, params: { q: `genre:"${g}"`, type: "artist", limit: 5, market: "from_token" }
+      });
+      const artists = a.data?.artists?.items || [];
+      let pool = [];
+      for (const art of artists) {
+        try {
+          const tt = await axios.get(`https://api.spotify.com/v1/artists/${art.id}/top-tracks`, {
+            headers, params: { market: "from_token" }
+          });
+          pool = pool.concat(tt.data?.tracks || []);
+        } catch { /* skip artist on error */ }
+        if (pool.length >= limit) break;
       }
+      return pool.slice(0, limit);
     };
 
-    // 1) English-ish filter first
-    pool = pool.filter(isEnglishishTrack);
+    // ---- BUILD POOL (this is where `pool` belongs) ----
+    let pool = [];
+    try { pool = await tryTrackSearch(); } catch { /* fall through */ }
+    if (!pool.length) pool = await tryArtistTopTracks();
+    if (!pool.length) {
+      // loose text fallback
+      const q = "chill calm mellow";
+      try {
+        const s = await axios.get("https://api.spotify.com/v1/search", {
+          headers, params: { q, type: "track", limit, market: "from_token" }
+        });
+        pool = s.data?.tracks?.items || [];
+      } catch { /* ignore */ }
+    }
+    if (!pool.length) return res.json({ tracks: [] });
 
-    // 2) Fetch features WITH headers (you already fixed this bug)
-    const byId = await fetchFeaturesMap(pool, headers);
-
-    // 3) Gate by mood using features (drop obvious mismatches)
-    let gated = pool.filter(t => withinMood(byId[t.id]));
-
-    // If gating got too aggressive, fall back to original pool
-    if (gated.length < 10) gated = pool;
-
-    // 4) Score and sort
+    // ---- FILTER → FEATURES → GATE → SCORE → DEDUPE ----
+    pool = pool.filter(isEnglishishTrack);                         // English-ish only
+    const byId = await fetchFeaturesMap(pool, headers);            // features
+    let gated = pool.filter(t => withinMood(byId[t.id]));          // mood gate
+    if (gated.length < 10) gated = pool;                           // relax if too few
     const ranked = gated
       .map(t => ({ t, s: scoreTrack(byId[t.id]) }))
-      .sort((a,b) => b.s - a.s)
+      .sort((a, b) => b.s - a.s)
       .map(x => x.t);
+    const finalList = capByArtist(ranked, 2).slice(0, 20);         // max 2/artist
 
-    // 5) Cap artists to max 2 each, then slice
-    const finalList = capByArtist(ranked, 2).slice(0, 20);
+    res.setHeader("X-Mood-Strategy", "pool/search+features");
+    return res.json({ tracks: finalList });
 
-    res.json({ tracks: finalList });
-
-      } catch (e) {
+  } catch (e) {
     return res.status(e.status || e.response?.status || 500).json({
       error: "mood-recs failed",
       step: e.step || undefined,
-      detail: e.msg || e.response?.data || e.message || e
+      detail: e.msg || e.response?.data || e.message || String(e)
     });
   }
 });
+
 
 
 
