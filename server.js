@@ -1,10 +1,10 @@
 // server.js
-// --- Boot & networking prefs (fixes odd 404s on some networks) ---
+// --- Boot & networking prefs (helps odd 404s on some local networks) ---
 import dns from "dns";
 import https from "https";
-dns.setDefaultResultOrder("ipv4first");                 // prefer IPv4
+dns.setDefaultResultOrder("ipv4first");                 // prefer IPv4 locally
 const ipv4Agent = new https.Agent({ family: 4 });       // reuse one IPv4 agent
-const useIPv4Agent = !process.env.RENDER; // true locally, false on Render
+const useIPv4Agent = !process.env.RENDER;              // true locally, false on Render
 
 // --- Standard imports ---
 import express from "express";
@@ -40,11 +40,38 @@ app.use(cookieParser());
 app.use(express.json());
 
 // --- In-memory token store (simple) ---
-let accessTokens = {}; // { demo: { access_token, refresh_token, ... } }
-const authHeader = () => ({ Authorization: `Bearer ${accessTokens.demo?.access_token || ""}` });
+let accessTokens = {}; // { demo: { access_token, refresh_token, expires_in, expires_at, ... } }
+
+// --- Helper: ensure valid Authorization header (auto-refresh if needed) ---
+async function getAuthHeaders() {
+  const t = accessTokens.demo;
+  if (!t?.access_token) throw Object.assign(new Error("No token"), { status: 401 });
+
+  // refresh if expired/near-expiry and we have a refresh_token
+  if (t.expires_at && Date.now() >= t.expires_at && t.refresh_token) {
+    const params = new URLSearchParams();
+    params.set("grant_type", "refresh_token");
+    params.set("refresh_token", t.refresh_token);
+
+    const r = await axios.post("https://accounts.spotify.com/api/token", params.toString(), {
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      auth: { username: SPOTIFY_CLIENT_ID, password: SPOTIFY_CLIENT_SECRET },
+    });
+
+    const nxt = r.data; // may or may not include a new refresh_token
+    accessTokens.demo = {
+      ...t,
+      ...nxt,
+      refresh_token: nxt.refresh_token || t.refresh_token,
+      expires_at: Date.now() + (Number(nxt.expires_in || 3600) - 60) * 1000, // refresh 1 min early
+    };
+  }
+
+  return { Authorization: `Bearer ${accessTokens.demo.access_token}` };
+}
 
 // ---------------- OAuth ----------------
-app.get("/login", (req, res) => {
+app.get("/login", (_req, res) => {
   const scope = [
     "user-read-email",
     "playlist-modify-public",
@@ -78,7 +105,12 @@ app.post("/callback", async (req, res) => {
       auth: { username: SPOTIFY_CLIENT_ID, password: SPOTIFY_CLIENT_SECRET },
     });
 
-    accessTokens.demo = tokenRes.data; // { access_token, refresh_token, ... }
+    const tok = tokenRes.data; // { access_token, refresh_token, expires_in, ... }
+    accessTokens.demo = {
+      ...tok,
+      expires_at: Date.now() + (Number(tok.expires_in || 3600) - 60) * 1000, // refresh 1 min early
+    };
+
     res.json({ ok: true });
   } catch (e) {
     console.error("TOKEN ERROR:", e.response?.status, e.response?.data || e.message);
@@ -89,7 +121,8 @@ app.post("/callback", async (req, res) => {
 // ---------------- API helpers ----------------
 app.get("/api/me", async (_req, res) => {
   try {
-    const r = await axios.get("https://api.spotify.com/v1/me", { headers: authHeader() });
+    const headers = await getAuthHeaders();
+    const r = await axios.get("https://api.spotify.com/v1/me", { headers });
     res.json({ id: r.data.id, product: r.data.product, country: r.data.country });
   } catch (e) {
     res.status(e.response?.status || 500).json(e.response?.data || e.message);
@@ -98,10 +131,11 @@ app.get("/api/me", async (_req, res) => {
 
 app.get("/api/available-genres", async (_req, res) => {
   try {
-    const r = await axios.get(
-      "https://api.spotify.com/v1/recommendations/available-genre-seeds",
-      { headers: authHeader(), httpsAgent: useIPv4Agent ? ipv4Agent : undefined } // <-- force IPv4 here
-    );
+    const headers = await getAuthHeaders();
+    const r = await axios.get("https://api.spotify.com/v1/recommendations/available-genre-seeds", {
+      headers,
+      httpsAgent: useIPv4Agent ? ipv4Agent : undefined,
+    });
     res.json(r.data);
   } catch (e) {
     res.status(e.response?.status || 500).json(e.response?.data || e.message);
@@ -110,136 +144,146 @@ app.get("/api/available-genres", async (_req, res) => {
 
 // ---------------- Recommendations (robust) ----------------
 app.get("/api/recommendations", async (req, res) => {
-  if (!accessTokens.demo?.access_token) {
-    return res.status(401).json({ error: "Not authorized. Click Re-connect Spotify." });
-  }
-
-  const headers = { ...authHeader(), Accept: "application/json" };
-
-  const params = {
-    limit: Number(req.query.limit || 20),
-    market: req.query.market || "from_token",
-  };
-  if (req.query.seed_genres) params.seed_genres = req.query.seed_genres;
-  if (req.query.seed_artists) params.seed_artists = req.query.seed_artists;
-  if (req.query.seed_tracks) params.seed_tracks = req.query.seed_tracks;
-  if (req.query.target_valence) params.target_valence = Number(req.query.target_valence);
-  if (req.query.target_energy) params.target_energy = Number(req.query.target_energy);
-  if (req.query.target_danceability) params.target_danceability = Number(req.query.target_danceability);
-  if (req.query.min_tempo) params.min_tempo = Number(req.query.min_tempo);
-
-  if (!params.seed_genres && !params.seed_artists && !params.seed_tracks) {
-    params.seed_genres = "pop"; // at least one seed
-  }
-
-  const forwardError = (label, e, extra = {}) => {
-    const status = e.response?.status || 500;
-    const data = e.response?.data || e.message;
-    console.error(`${label}:`, status, data, extra);
-    return { status, data };
-  };
-
-  // Primary: Spotify recommendations (force IPv4 agent)
   try {
-    console.log("RECS primary params ->", params);
-    const r1 = await axios.get("https://api.spotify.com/v1/recommendations", {
-      headers,
-      params,
-      httpsAgent: useIPv4Agent ? ipv4Agent : undefined
+    const baseHeaders = await getAuthHeaders();
+    const headers = { ...baseHeaders, Accept: "application/json" };
+
+    const params = {
+      limit: Number(req.query.limit || 20),
+      market: req.query.market || "from_token",
+    };
+    if (req.query.seed_genres) params.seed_genres = req.query.seed_genres;
+    if (req.query.seed_artists) params.seed_artists = req.query.seed_artists;
+    if (req.query.seed_tracks) params.seed_tracks = req.query.seed_tracks;
+    if (req.query.target_valence) params.target_valence = Number(req.query.target_valence);
+    if (req.query.target_energy) params.target_energy = Number(req.query.target_energy);
+    if (req.query.target_danceability) params.target_danceability = Number(req.query.target_danceability);
+    if (req.query.min_tempo) params.min_tempo = Number(req.query.min_tempo);
+
+    if (!params.seed_genres && !params.seed_artists && !params.seed_tracks) {
+      params.seed_genres = "pop"; // at least one seed
+    }
+
+    const forwardError = (label, e, extra = {}) => {
+      const status = e.response?.status || 500;
+      const data = e.response?.data || e.message;
+      console.error(`${label}:`, status, data, extra);
+      return { status, data };
+    };
+
+    // Primary: Spotify /recommendations
+    try {
+      console.log("RECS primary params ->", params);
+      const r1 = await axios.get("https://api.spotify.com/v1/recommendations", {
+        headers,
+        params,
+        httpsAgent: useIPv4Agent ? ipv4Agent : undefined,
+      });
+      return res.json(r1.data);
+    } catch (e1) {
+      // If token went stale mid-call, force refresh once and retry
+      if (e1.response?.status === 401 && accessTokens.demo) {
+        accessTokens.demo.expires_at = 0;
+        const headers2 = { ...(await getAuthHeaders()), Accept: "application/json" };
+        const r1b = await axios.get("https://api.spotify.com/v1/recommendations", {
+          headers: headers2,
+          params,
+          httpsAgent: useIPv4Agent ? ipv4Agent : undefined,
+        });
+        return res.json(r1b.data);
+      }
+      forwardError("RECS ERROR (primary)", e1, { PARAMS: params });
+    }
+
+    // Fallback 1: artist-seeded recs (same endpoint)
+    try {
+      const p2 = { limit: params.limit, market: params.market, seed_artists: "4NHQUGzhtTLFvgF5SZesLK" };
+      console.log("RECS fallback artist params ->", p2);
+      const r2 = await axios.get("https://api.spotify.com/v1/recommendations", {
+        headers,
+        params: p2,
+        httpsAgent: useIPv4Agent ? ipv4Agent : undefined,
+      });
+      return res.json(r2.data);
+    } catch (e2) {
+      forwardError("RECS ERROR (artist fallback)", e2);
+    }
+
+    // Fallback 2: Search + Audio Features scoring (omit market; search works for you)
+    try {
+      const genre = (params.seed_genres || "pop").split(",")[0];
+      console.log("RECS search fallback genre ->", genre);
+
+      const s = await axios.get("https://api.spotify.com/v1/search", {
+        headers: baseHeaders, // no Accept needed
+        params: { q: `genre:"${genre}"`, type: "track", limit: params.limit },
+      });
+      const tracks = s.data?.tracks?.items || [];
+      if (!tracks.length) return res.json({ tracks: [] });
+
+      const ids = tracks.map((t) => t.id).join(",");
+      const feats = await axios.get("https://api.spotify.com/v1/audio-features", {
+        headers: baseHeaders,
+        params: { ids },
+      });
+      const byId = Object.fromEntries((feats.data.audio_features || []).map((f) => [f.id, f]));
+
+      const targV = Number(req.query.target_valence ?? 0.5);
+      const targE = Number(req.query.target_energy ?? 0.5);
+
+      const scored = tracks
+        .map((t) => {
+          const f = byId[t.id] || {};
+          const v = f.valence ?? 0.5;
+          const en = f.energy ?? 0.5;
+          const score = -(Math.abs(v - targV) + Math.abs(en - targE));
+          return { track: t, score };
+        })
+        .sort((a, b) => b.score - a.score)
+        .map((x) => x.track);
+
+      return res.json({ tracks: scored.slice(0, 20) });
+    } catch (e3) {
+      forwardError("RECS ERROR (search fallback)", e3);
+    }
+
+    // Final safety: small static list so your demo never blanks
+    console.warn("RECS final fallback: returning static IDs");
+    return res.json({
+      tracks: [
+        {
+          id: "3AJwUDP919kvQ9QcozQPxg",
+          name: "As It Was",
+          uri: "spotify:track:3AJwUDP919kvQ9QcozQPxg",
+          artists: [{ name: "Harry Styles" }],
+          album: { name: "Harry's House" },
+          external_urls: { spotify: "https://open.spotify.com/track/3AJwUDP919kvQ9QcozQPxg" },
+        },
+        {
+          id: "7oK9VyNzrYvRFo7nQEYkWN",
+          name: "Mr. Brightside",
+          uri: "spotify:track:7oK9VyNzrYvRFo7nQEYkWN",
+          artists: [{ name: "The Killers" }],
+          album: { name: "Hot Fuss" },
+          external_urls: { spotify: "https://open.spotify.com/track/7oK9VyNzrYvRFo7nQEYkWN" },
+        },
+      ],
     });
-    return res.json(r1.data);
-  } catch (e1) {
-    forwardError("RECS ERROR (primary)", e1, { PARAMS: params });
+  } catch (e) {
+    const status = e.status || e.response?.status || 500;
+    res.status(status).json({ error: "recommendations failed", detail: e.response?.data || e.message });
   }
-
-  // Fallback 1: artist-seeded recs (same endpoint, different seeds)
-  try {
-    const p2 = { limit: params.limit, market: params.market, seed_artists: "4NHQUGzhtTLFvgF5SZesLK" };
-    console.log("RECS fallback artist params ->", p2);
-    const r2 = await axios.get("https://api.spotify.com/v1/recommendations", {
-      headers,
-      params: p2,
-      httpsAgent: useIPv4Agent ? ipv4Agent : undefined
-    });
-    return res.json(r2.data);
-  } catch (e2) {
-    forwardError("RECS ERROR (artist fallback)", e2);
-  }
-
-  // Fallback 2: Search + Audio Features scoring (omit market; search works for you)
-  try {
-    const genre = (params.seed_genres || "pop").split(",")[0];
-    console.log("RECS search fallback genre ->", genre);
-
-    const s = await axios.get("https://api.spotify.com/v1/search", {
-      headers,
-      params: { q: `genre:"${genre}"`, type: "track", limit: params.limit },
-    });
-    const tracks = s.data?.tracks?.items || [];
-    if (!tracks.length) return res.json({ tracks: [] });
-
-    const ids = tracks.map((t) => t.id).join(",");
-    const feats = await axios.get("https://api.spotify.com/v1/audio-features", {
-      headers,
-      params: { ids },
-    });
-    const byId = Object.fromEntries((feats.data.audio_features || []).map((f) => [f.id, f]));
-
-    const targV = Number(req.query.target_valence ?? 0.5);
-    const targE = Number(req.query.target_energy ?? 0.5);
-
-    const scored = tracks
-      .map((t) => {
-        const f = byId[t.id] || {};
-        const v = f.valence ?? 0.5;
-        const en = f.energy ?? 0.5;
-        const score = -(Math.abs(v - targV) + Math.abs(en - targE));
-        return { track: t, score };
-      })
-      .sort((a, b) => b.score - a.score)
-      .map((x) => x.track);
-
-    return res.json({ tracks: scored.slice(0, 20) });
-  } catch (e3) {
-    forwardError("RECS ERROR (search fallback)", e3);
-  }
-
-  // Final safety: small static list so your demo never blanks
-  console.warn("RECS final fallback: returning static IDs");
-  return res.json({
-    tracks: [
-      {
-        id: "3AJwUDP919kvQ9QcozQPxg",
-        name: "As It Was",
-        uri: "spotify:track:3AJwUDP919kvQ9QcozQPxg",
-        artists: [{ name: "Harry Styles" }],
-        album: { name: "Harry's House" },
-        external_urls: { spotify: "https://open.spotify.com/track/3AJwUDP919kvQ9QcozQPxg" },
-      },
-      {
-        id: "7oK9VyNzrYvRFo7nQEYkWN",
-        name: "Mr. Brightside",
-        uri: "spotify:track:7oK9VyNzrYvRFo7nQEYkWN",
-        artists: [{ name: "The Killers" }],
-        album: { name: "Hot Fuss" },
-        external_urls: { spotify: "https://open.spotify.com/track/7oK9VyNzrYvRFo7nQEYkWN" },
-      },
-    ],
-  });
 });
 
 // ---------------- Extra fallback endpoint (optional direct use) ----------------
 app.get("/api/recommendations_fallback", async (req, res) => {
-  if (!accessTokens.demo?.access_token) {
-    return res.status(401).json({ error: "Not authorized. Click Re-connect Spotify." });
-  }
-  const headers = authHeader();
-
-  const genre = (req.query.genre || "pop").replace(/\s+/g, "-");
-  const targetValence = Number(req.query.target_valence ?? 0.5);
-  const targetEnergy = Number(req.query.target_energy ?? 0.5);
-
   try {
+    const headers = await getAuthHeaders();
+
+    const genre = (req.query.genre || "pop").replace(/\s+/g, "-");
+    const targetValence = Number(req.query.target_valence ?? 0.5);
+    const targetEnergy = Number(req.query.target_energy ?? 0.5);
+
     const search = await axios.get("https://api.spotify.com/v1/search", {
       headers,
       params: { q: `genre:"${genre}"`, type: "track", limit: 30 },
@@ -259,7 +303,7 @@ app.get("/api/recommendations_fallback", async (req, res) => {
         const f = byId[t.id] || {};
         const v = f.valence ?? 0.5;
         const en = f.energy ?? 0.5;
-        const score = -(Math.abs(v - targetValence) + Math.abs(en - targetEnergy));
+        const score = -(Math.abs(v - targetValence) + Math.abs(energy - targetEnergy));
         return { track: t, score };
       })
       .sort((a, b) => b.score - a.score)
@@ -274,10 +318,11 @@ app.get("/api/recommendations_fallback", async (req, res) => {
 // ---------------- Debug routes ----------------
 app.get("/debug/recs-min", async (_req, res) => {
   try {
+    const headers = await getAuthHeaders();
     const r = await axios.get("https://api.spotify.com/v1/recommendations", {
-      headers: authHeader(),
+      headers,
       params: { seed_genres: "pop", limit: 1 },
-      httpsAgent: useIPv4Agent ? ipv4Agent : undefined, // <— crucial
+      httpsAgent: useIPv4Agent ? ipv4Agent : undefined,
     });
     res.json({ ok: true, tracks: r.data.tracks?.length || 0 });
   } catch (e) {
@@ -293,10 +338,11 @@ app.get("/debug/recs-min", async (_req, res) => {
 
 app.get("/debug/recs-artist", async (_req, res) => {
   try {
+    const headers = await getAuthHeaders();
     const r = await axios.get("https://api.spotify.com/v1/recommendations", {
-      headers: authHeader(),
+      headers,
       params: { seed_artists: "4NHQUGzhtTLFvgF5SZesLK", limit: 1 },
-      httpsAgent: useIPv4Agent ? ipv4Agent : undefined, // <— crucial
+      httpsAgent: useIPv4Agent ? ipv4Agent : undefined,
     });
     res.json({ ok: true, tracks: r.data.tracks?.length || 0 });
   } catch (e) {
@@ -313,8 +359,9 @@ app.get("/debug/recs-artist", async (_req, res) => {
 // recommendations with explicit market=US and seed_genres=pop
 app.get("/debug/recs-us", async (_req, res) => {
   try {
+    const headers = await getAuthHeaders();
     const r = await axios.get("https://api.spotify.com/v1/recommendations", {
-      headers: { Authorization: `Bearer ${accessTokens.demo?.access_token}` },
+      headers,
       params: { seed_genres: "pop", limit: 1, market: "US" },
     });
     res.json({ ok: true, tracks: r.data.tracks?.length || 0 });
@@ -329,8 +376,9 @@ app.get("/debug/recs-us", async (_req, res) => {
 // recommendations seeded by a known track (bypasses genres)
 app.get("/debug/recs-track", async (_req, res) => {
   try {
+    const headers = await getAuthHeaders();
     const r = await axios.get("https://api.spotify.com/v1/recommendations", {
-      headers: { Authorization: `Bearer ${accessTokens.demo?.access_token}` },
+      headers,
       params: { seed_tracks: "3AJwUDP919kvQ9QcozQPxg", limit: 1, market: "US" },
     });
     res.json({ ok: true, tracks: r.data.tracks?.length || 0 });
@@ -344,8 +392,9 @@ app.get("/debug/recs-track", async (_req, res) => {
 
 app.get("/debug/recs-noagent", async (_req, res) => {
   try {
+    const headers = await getAuthHeaders();
     const r = await axios.get("https://api.spotify.com/v1/recommendations", {
-      headers: { Authorization: `Bearer ${accessTokens.demo?.access_token}` },
+      headers,
       params: { seed_genres: "pop", limit: 1 },
       // NO httpsAgent here
     });
@@ -363,9 +412,10 @@ app.get("/debug/recs-noagent", async (_req, res) => {
 
 app.get("/debug/seeds", async (_req, res) => {
   try {
+    const headers = await getAuthHeaders();
     const r = await axios.get("https://api.spotify.com/v1/recommendations/available-genre-seeds", {
-      headers: authHeader(),
-      httpsAgent: useIPv4Agent ? ipv4Agent : undefined, // <— crucial
+      headers,
+      httpsAgent: useIPv4Agent ? ipv4Agent : undefined,
     });
     res.json(r.data);
   } catch (e) {
@@ -380,8 +430,9 @@ app.get("/debug/seeds", async (_req, res) => {
 
 app.get("/debug/search-pop", async (_req, res) => {
   try {
+    const headers = await getAuthHeaders();
     const r = await axios.get("https://api.spotify.com/v1/search", {
-      headers: authHeader(),
+      headers,
       params: { q: 'genre:"pop"', type: "track", limit: 1 }, // no market (works for you)
     });
     res.json({ ok: true, tracks: r.data.tracks?.items?.length || 0 });
@@ -401,4 +452,3 @@ app.get("/health", (_req, res) => res.json({ ok: true }));
 
 // ---------------- Listen ----------------
 app.listen(PORT, () => console.log(`Server listening on ${PORT}`));
-
