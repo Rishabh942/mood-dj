@@ -48,7 +48,8 @@ useEffect(() => {
       target_danceability: base.target_danceability.toString(),
       min_tempo: String(base.min_tempo),
     });
-    const r = await axios.get(`${API}/api/recommendations?${params.toString()}`);
+    const r = await axios.get(`${API}/api/mood-recs?${params.toString()}`);
+
     setTracks(r.data.tracks || []);
   };
 

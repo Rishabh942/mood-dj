@@ -303,7 +303,7 @@ app.get("/api/recommendations_fallback", async (req, res) => {
         const f = byId[t.id] || {};
         const v = f.valence ?? 0.5;
         const en = f.energy ?? 0.5;
-        const score = -(Math.abs(v - targetValence) + Math.abs(energy - targetEnergy));
+        const score = -(Math.abs(v - targetValence) + Math.abs(en - targetEnergy));
         return { track: t, score };
       })
       .sort((a, b) => b.score - a.score)
@@ -446,6 +446,66 @@ app.get("/debug/search-pop", async (_req, res) => {
     });
   }
 });
+
+// Mood-based recommendations that avoid /v1/recommendations entirely
+app.get("/api/mood-recs", async (req, res) => {
+  try {
+    const headers = await getAuthHeaders();
+
+    // inputs from client
+    const seedGenres = String(req.query.seed_genres || "pop")
+      .split(",").map(s => s.trim()).filter(Boolean);
+    const limit            = Number(req.query.limit || 40);
+    const targetValence    = Number(req.query.target_valence ?? 0.5);
+    const targetEnergy     = Number(req.query.target_energy  ?? 0.5);
+    const targetDance      = Number(req.query.target_danceability ?? 0.5);
+    const minTempo         = Number(req.query.min_tempo ?? 0);
+
+    // Build a search query like: genre:"lo-fi" OR genre:"chill"
+    const q = seedGenres.length
+      ? seedGenres.map(g => `genre:"${g}"`).join(" OR ")
+      : 'genre:"pop"';
+
+    // 1) Search a pool of tracks
+    const s = await axios.get("https://api.spotify.com/v1/search", {
+      headers,
+      params: { q, type: "track", limit: Math.min(Math.max(limit, 20), 50) }, // 20–50
+    });
+    const tracks = s.data?.tracks?.items || [];
+    if (!tracks.length) return res.json({ tracks: [] });
+
+    // 2) Fetch audio features
+    const ids = tracks.map(t => t.id).join(",");
+    const feats = await axios.get("https://api.spotify.com/v1/audio-features", {
+      headers, params: { ids },
+    });
+    const byId = Object.fromEntries((feats.data.audio_features || []).map(f => [f.id, f]));
+
+    // 3) Score by mood closeness
+    const scored = tracks.map(t => {
+      const f  = byId[t.id] || {};
+      const v  = f.valence ?? 0.5;
+      const en = f.energy  ?? 0.5;
+      const da = f.danceability ?? 0.5;
+      const te = f.tempo ?? 0;
+
+      const score =
+        - (Math.abs(v  - targetValence) * 0.40
+        +  Math.abs(en - targetEnergy)  * 0.40
+        +  Math.abs(da - targetDance)   * 0.15
+        +  (minTempo ? Math.max(0, minTempo - te) / 200 : 0) * 0.05);
+
+      return { track: t, score };
+    })
+    .sort((a,b) => b.score - a.score)
+    .map(x => x.track);
+
+    res.json({ tracks: scored.slice(0, 20) });
+  } catch (e) {
+    res.status(e.response?.status || 500).json({ error: "mood-recs failed", detail: e.response?.data || e.message });
+  }
+});
+
 
 // ---------------- Health ----------------
 app.get("/health", (_req, res) => res.json({ ok: true }));
