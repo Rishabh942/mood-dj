@@ -3,7 +3,7 @@ import { useEffect, useState } from "react";
 import axios from "axios";
 import { EMOTION_TO_FEATURES } from "./emotionMap";
 
-const API = import.meta.env.VITE_BACKEND_URL;
+const API = "https://mood-dj-eight.vercel.app";
 
 export default function PlaylistCreator() {
   const [tracks, setTracks] = useState([]);
