@@ -81,7 +81,7 @@ export default function PlaylistCreator() {
         </button>
 
         <label>
-          Mood:&nbsp;
+          Mood:
           <select value={emotion} onChange={(e) => setEmotion(e.target.value)}>
             {Object.keys(EMOTION_TO_FEATURES).map((m) => (
               <option key={m} value={m}>
