@@ -11,6 +11,8 @@ export default function PlaylistCreator() {
   const [mode, setMode] = useState("match"); // "match" or "change"
   const [authed, setAuthed] = useState(false);
 
+  console.warn("1")
+
   // Handle Spotify redirect ?code=... (guard against double-call)
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
@@ -33,6 +35,8 @@ export default function PlaylistCreator() {
         console.error(err);
       });
   }, []);
+
+  console.warn("2")
 
   const connectSpotify = () => {
     // allow a fresh exchange on every login click
@@ -61,6 +65,8 @@ export default function PlaylistCreator() {
     const r = await axios.get(`${API}/api/mood-recs?${params.toString()}`);
     setTracks(r.data.tracks || []);
   };
+
+  console.warn("3")
 
   const createPlaylist = async () => {
     const uris = tracks.map((t) => t.uri);
