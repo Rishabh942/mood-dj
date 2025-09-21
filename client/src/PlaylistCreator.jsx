@@ -3,38 +3,19 @@ import { useEffect, useState } from "react";
 import axios from "axios";
 import { EMOTION_TO_FEATURES } from "./emotionMap";
 
-const API = "https://mood-dj-nh7g.onrender.com";
+const API = import.meta.env.VITE_API_URL || "http://127.0.0.1:8080";
 
-export default function PlaylistCreator() {
+export default function PlaylistCreator({ forcedEmotion, useCamera = true }) {
   const [tracks, setTracks] = useState([]);
-  const [emotion, setEmotion] = useState("neutral");
+  const [emotion, setEmotion] = useState(forcedEmotion || "neutral");
   const [mode, setMode] = useState("match"); // "match" or "change"
   const [authed, setAuthed] = useState(false);
 
   console.warn("1")
 
-  // Handle Spotify redirect ?code=... (guard against double-call)
   useEffect(() => {
-    const params = new URLSearchParams(window.location.search);
-    const code = params.get("code");
-    const already = sessionStorage.getItem("code_exchanged"); // guard
-
-    if (!code || already) return;
-
-    sessionStorage.setItem("code_exchanged", "1");
-    axios
-      .post(`${API}/callback`, { code })
-      .then(() => {
-        setAuthed(true);
-        // clean URL so refreshes don't try to reuse the code
-        window.history.replaceState({}, "", "/");
-      })
-      .catch((err) => {
-        alert("Auth failed; try Connect again.");
-        sessionStorage.removeItem("code_exchanged"); // allow retry
-        console.error(err);
-      });
-  }, []);
+   if (useCamera && forcedEmotion) setEmotion(forcedEmotion);
+  }, [forcedEmotion, useCamera]);
 
   console.warn("2")
 

@@ -2,7 +2,7 @@
 import React, { useEffect, useRef, useState } from "react";
 import * as faceapi from "face-api.js";
 
-export default function EmotionDetector() {
+export default function EmotionDetector({ onChange }) {
   const videoRef = useRef(null);
   const canvasRef = useRef(null);
 
@@ -15,15 +15,8 @@ export default function EmotionDetector() {
   const FRAME_INTERVAL = 10;
   const CONFIDENCE_THRESHOLD = 0.3;
 
-  const emotionPriority = {
-    angry: 1.5,
-    sad: 1.5,
-    fear: 5,
-    disgust: 8,
-    happy: 1.2,
-    surprise: 4,
-    neutral: 0.1,
-  };
+  const emotionPriority = {angry: 1.5, sad: 1.5, fearful: 5, disgusted: 8, happy: 1.2, surprised: 4, neutral: 0.1,};
+  const mapForPlaylist = (e) => ({ disgusted: "disgust", fearful: "fearful", surprised: "surprised" }[e] || e);
 
   useEffect(() => {
     async function startVideo() {
@@ -71,17 +64,9 @@ export default function EmotionDetector() {
       }
 
       // Short-term
-      let smoothedEmotion = "Detecting...";
-      if (emotionWindow.length > 0) {
-        const counts = {};
-        emotionWindow.forEach((e) => (counts[e] = (counts[e] || 0) + 1));
-        const weighted = {};
-        for (let e in counts) weighted[e] = counts[e] * (emotionPriority[e] || 1);
-        smoothedEmotion = Object.keys(weighted).reduce((a, b) =>
-          weighted[a] > weighted[b] ? a : b
-        );
+      if (onChange && smoothedEmotion && smoothedEmotion !== "Detecting...") {
+        onChange(mapForPlaylist(smoothedEmotion));
       }
-      setRecentMood(smoothedEmotion);
 
       // Long-term 1-minute
       const now = Date.now();
@@ -117,10 +102,10 @@ export default function EmotionDetector() {
     return () => clearInterval(interval);
   }, []);
 
-  return (
-    <div>
+return (
+    <div style={{ position: "relative", display: "inline-block" }}>
       <video ref={videoRef} autoPlay muted width="720" height="560" style={{ borderRadius: "8px" }} />
-      <canvas ref={canvasRef} width="720" height="560" style={{ position: "absolute", top: 0, left: 0 }} />
+      <canvas ref={canvasRef} width="720" height="560" style={{ position: "absolute", top: 0, left: 0, pointerEvents: "none" }} />
       <div style={{ marginTop: "10px" }}>
         <h2>Recent Mood: {recentMood}</h2>
         <h2>1-Min Mood: {oneMinuteMood}</h2>

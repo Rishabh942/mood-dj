@@ -5,6 +5,7 @@ import https from "https";
 dns.setDefaultResultOrder("ipv4first");                 // prefer IPv4 locally
 const ipv4Agent = new https.Agent({ family: 4 });       // reuse one IPv4 agent
 const useIPv4Agent = !process.env.RENDER;              // true locally, false on Render
+const PORT = process.env.PORT || 8080;
 
 // --- Standard imports ---
 import express from "express";
@@ -33,14 +34,22 @@ console.log("Redirect:", SPOTIFY_REDIRECT_URI);
 
 // --- App setup ---
 const app = express();
-const ALLOWED_ORIGINS = ["https://mood-dj-eight.vercel.app/callback"];
+const ALLOWED_ORIGINS = [
+  "http://127.0.0.1:5173",
+  "http://localhost:5173",
+  "https://mood-dj-eight.vercel.app"
+];
 
 app.use(
   cors({
-    origin: (origin, cb) => (!origin || ALLOWED_ORIGINS.includes(origin) ? cb(null, true) : cb(null, false)),
+    origin: (origin, cb) => {
+      if (!origin) return cb(null, true);
+      cb(null, ALLOWED_ORIGINS.includes(origin));
+    },
     credentials: true,
   })
-  );
+);
+
 app.use(cookieParser());
 app.use(express.json());
 
@@ -118,7 +127,7 @@ app.get("/login", (_req, res) => {
   url.searchParams.set("response_type", "code");
   url.searchParams.set("client_id", SPOTIFY_CLIENT_ID);
   url.searchParams.set("scope", scope);
-  url.searchParams.set("redirect_uri", "https://mood-dj-eight.vercel.app/callback");
+  url.searchParams.set("redirect_uri", SPOTIFY_REDIRECT_URI);
   url.searchParams.set("state", state);
 
   res.redirect(url.toString());
@@ -636,6 +645,39 @@ app.get("/api/mood-recs", async (req, res) => {
     });
   }
 });
+
+app.post("/api/create-playlist", async (req, res) => {
+  try {
+    const { uris = [], name = "Mood DJ" } = req.body || {};
+    if (!uris.length) return res.status(400).json({ error: "No track URIs" });
+
+    const headers = await getAuthHeaders();
+    // 1) who am I
+    const me = await axios.get("https://api.spotify.com/v1/me", { headers });
+    const userId = me.data.id;
+
+    // 2) create playlist
+    const created = await axios.post(
+      `https://api.spotify.com/v1/users/${userId}/playlists`,
+      { name, description: "Auto-created by Mood DJ", public: false },
+      { headers }
+    );
+    const playlistId = created.data.id;
+
+    // 3) add tracks
+    await axios.post(
+      `https://api.spotify.com/v1/playlists/${playlistId}/tracks`,
+      { uris },
+      { headers }
+    );
+
+    return res.json({ ok: true, id: playlistId, url: created.data.external_urls.spotify });
+  } catch (e) {
+    console.error("CREATE PLAYLIST ERROR:", e.response?.status, e.response?.data || e.message);
+    res.status(e.response?.status || 500).json({ error: "create failed", detail: e.response?.data || e.message });
+  }
+});
+
 
 
 
