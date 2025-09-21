@@ -12,7 +12,9 @@ import axios from "axios";
 import cookieParser from "cookie-parser";
 import cors from "cors";
 import dotenv from "dotenv";
-dotenv.config({ override: true });
+if (process.env.NODE_ENV !== "production") {
+  dotenv.config(); // local only
+}
 
 // --- Env ---
 const {
@@ -21,6 +23,10 @@ const {
   SPOTIFY_REDIRECT_URI = "https://mood-j9zzxxqct-rishabh942s-projects.vercel.app",
   PORT = 5174,
 } = process.env;
+
+for (const k of ["SPOTIFY_CLIENT_ID","SPOTIFY_CLIENT_SECRET","SPOTIFY_REDIRECT_URI"]) {
+  if (!process.env[k]) console.error(`Missing env: ${k}`);
+}
 
 console.log("Client ID:", SPOTIFY_CLIENT_ID);
 console.log("Secret length:", SPOTIFY_CLIENT_SECRET ? SPOTIFY_CLIENT_SECRET.length : 0);
