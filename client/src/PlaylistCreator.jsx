@@ -3,7 +3,7 @@ import { useEffect, useState } from "react";
 import axios from "axios";
 import { EMOTION_TO_FEATURES } from "./emotionMap";
 
-const API = "https://mood-dj-eight.vercel.app";
+const API = "https://mood-dj-nh7g.onrender.com";
 
 export default function PlaylistCreator() {
   const [tracks, setTracks] = useState([]);
