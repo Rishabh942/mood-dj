@@ -1,5 +1,5 @@
 import React, { useEffect } from "react";
-import handler from AuthHandler.jsx;
+import handler from "AuthHandler.jsx";
 //import SpotifyGetPlaylists from "./components/SpotifyGetPlaylists/SpotifyGetPlaylists";
 
 const CLIENT_ID = "2bac9dd24bf34179a1bea64d22e9ff07"; // insert your client id here from spotify
