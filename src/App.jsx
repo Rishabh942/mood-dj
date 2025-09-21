@@ -1,4 +1,5 @@
 import React, { useEffect } from "react";
+import handler from AuthHandler.jsx;
 //import SpotifyGetPlaylists from "./components/SpotifyGetPlaylists/SpotifyGetPlaylists";
 
 const CLIENT_ID = "2bac9dd24bf34179a1bea64d22e9ff07"; // insert your client id here from spotify
@@ -53,7 +54,7 @@ const WebApp = () => {
   return (
     <div className="container">
       <h1>hi</h1>
-      <button onClick={handleLogin}>login to spotify</button>
+      <button onClick={handler}>login to spotify</button>
     </div>
   );
 };
