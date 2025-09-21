@@ -20,7 +20,7 @@ if (process.env.NODE_ENV !== "production") {
 const {
   SPOTIFY_CLIENT_ID,
   SPOTIFY_CLIENT_SECRET,
-  SPOTIFY_REDIRECT_URI = "mood-dj-eight.vercel.app/callback",
+  SPOTIFY_REDIRECT_URI = "https://mood-dj-eight.vercel.app/callback",
 } = process.env;
 
 for (const k of ["SPOTIFY_CLIENT_ID","SPOTIFY_CLIENT_SECRET","SPOTIFY_REDIRECT_URI"]) {
@@ -33,7 +33,7 @@ console.log("Redirect:", SPOTIFY_REDIRECT_URI);
 
 // --- App setup ---
 const app = express();
-const ALLOWED_ORIGINS = ["https://mood-j9zzxxqct-rishabh942s-projects.vercel.app"];
+const ALLOWED_ORIGINS = ["https://mood-dj-eight.vercel.app/callback"];
 
 app.use(
   cors({
@@ -118,7 +118,7 @@ app.get("/login", (_req, res) => {
   url.searchParams.set("response_type", "code");
   url.searchParams.set("client_id", SPOTIFY_CLIENT_ID);
   url.searchParams.set("scope", scope);
-  url.searchParams.set("redirect_uri", SPOTIFY_REDIRECT_URI);
+  url.searchParams.set("redirect_uri", "https://mood-dj-eight.vercel.app/callback");
   url.searchParams.set("state", state);
 
   res.redirect(url.toString());
