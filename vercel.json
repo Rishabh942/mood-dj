@@ -1,0 +1,10 @@
+{
+  "rewrites": [
+    { "source": "/login", "destination": 
+"https://mood-dj-nh7g.onrender.com/login" },
+    { "source": "/callback", "destination": 
+"https://mood-dj-nh7g.onrender.com/callback" },
+    { "source": "/api/:path*", "destination": 
+"https://mood-dj-nh7g.onrender.com/api/:path*" }
+  ]
+}
