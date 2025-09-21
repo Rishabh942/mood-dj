@@ -18,7 +18,7 @@ dotenv.config({ override: true });
 const {
   SPOTIFY_CLIENT_ID,
   SPOTIFY_CLIENT_SECRET,
-  SPOTIFY_REDIRECT_URI = "http://127.0.0.1:5173/callback",
+  SPOTIFY_REDIRECT_URI = "https://mood-j9zzxxqct-rishabh942s-projects.vercel.app/api/callback",
   PORT = 5174,
 } = process.env;
 
@@ -28,7 +28,7 @@ console.log("Redirect:", SPOTIFY_REDIRECT_URI);
 
 // --- App setup ---
 const app = express();
-const ALLOWED_ORIGINS = ["http://127.0.0.1:5173", "https://mooddj.com"];
+const ALLOWED_ORIGINS = ["http://127.0.0.1:5173", "https://mooddj.com", "https://mood-j9zzxxqct-rishabh942s-projects.vercel.app/api/callback"];
 
 app.use(
   cors({
