@@ -20,8 +20,7 @@ if (process.env.NODE_ENV !== "production") {
 const {
   SPOTIFY_CLIENT_ID,
   SPOTIFY_CLIENT_SECRET,
-  SPOTIFY_REDIRECT_URI = "https://mood-j9zzxxqct-rishabh942s-projects.vercel.app",
-  PORT = 5174,
+  SPOTIFY_REDIRECT_URI = "mood-dj-eight.vercel.app/callback",
 } = process.env;
 
 for (const k of ["SPOTIFY_CLIENT_ID","SPOTIFY_CLIENT_SECRET","SPOTIFY_REDIRECT_URI"]) {
