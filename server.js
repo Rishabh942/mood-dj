@@ -28,7 +28,7 @@ console.log("Redirect:", SPOTIFY_REDIRECT_URI);
 
 // --- App setup ---
 const app = express();
-const ALLOWED_ORIGINS = ["http://127.0.0.1:5173", "https://mooddj.com", "https://mood-j9zzxxqct-rishabh942s-projects.vercel.app/api/callback"];
+const ALLOWED_ORIGINS = ["https://mood-j9zzxxqct-rishabh942s-projects.vercel.app/api/callback"];
 
 app.use(
   cors({
