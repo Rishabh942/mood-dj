@@ -680,7 +680,9 @@ app.post("/api/create-playlist", async (req, res) => {
 
 
 
-
+app.get("/", (_req, res) => {
+  res.json({ ok: true, service: "mood-dj-backend" });
+});
 
 
 // ---------------- Health ----------------
